@@ -6,6 +6,7 @@ import sys
 import signal
 import time
 import cv2
+import subprocess
 
 try:
     import Jetson.GPIO as GPIO
@@ -33,64 +34,80 @@ def main():
     cfg = Config()
 
     print("[INIT] Starting gimbal system...")
-    motor = MotorController(cfg)
-    laser = LaserController(cfg)
-    pid_x = AdaptivePID(cfg)
-    pid_y = AdaptivePID(cfg)
-    keys = GPIOInput(cfg)
-    sm = GimbalStateMachine(motor, laser, pid_x, pid_y, cfg)
+    motor = None
+    laser = None
+    cap = None
 
-    # OpenCV 3.2 不支持MJPG解码，先用v4l2-ctl切到YUYV
-    import subprocess
-    subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
-                    f"--set-fmt-video=width={cfg.CAM_WIDTH},height={cfg.CAM_HEIGHT},pixelformat=YUYV"],
-                   stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
+    try:
+        motor = MotorController(cfg)
+        laser = LaserController(cfg)
+        pid_x = AdaptivePID(cfg)
+        pid_y = AdaptivePID(cfg)
+        keys = GPIOInput(cfg)
+        sm = GimbalStateMachine(motor, laser, pid_x, pid_y, cfg)
 
-    cap = cv2.VideoCapture(cfg.CAM_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.CAM_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.CAM_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, cfg.CAM_FPS)
-    time.sleep(0.3)
-    if not cap.isOpened():
-        print("[ERROR] Camera not found")
-        return
+        # OpenCV 3.2 不支持MJPG解码，先用v4l2-ctl切到YUYV。
+        try:
+            subprocess.run(
+                [
+                    "v4l2-ctl", "-d", f"/dev/video{cfg.CAM_INDEX}",
+                    "--set-fmt-video="
+                    f"width={cfg.CAM_WIDTH},height={cfg.CAM_HEIGHT},pixelformat=YUYV",
+                ],
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            time.sleep(0.5)
+        except FileNotFoundError:
+            print("[WARN] v4l2-ctl not found, using camera default format")
 
-    if cfg.FULLSCREEN:
-        cv2.namedWindow(cfg.WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
-        cv2.setWindowProperty(cfg.WINDOW_NAME, cv2.WND_PROP_FULLSCREEN,
-                              cv2.WINDOW_FULLSCREEN)
+        cap = cv2.VideoCapture(cfg.CAM_INDEX)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.CAM_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.CAM_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, cfg.CAM_FPS)
+        time.sleep(0.3)
+        if not cap.isOpened():
+            print("[ERROR] Camera not found")
+            return
 
-    print("[INIT] Ready. KEY1=start, KEY2=mode switch")
-    running = True
-    while running:
-        ret, frame = cap.read()
-        if not ret:
-            continue
+        if cfg.FULLSCREEN:
+            cv2.namedWindow(cfg.WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
+            cv2.setWindowProperty(
+                cfg.WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+            )
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        det = detect_target(gray, cfg)
-        keys.update()
+        print("[INIT] Ready. KEY1=start, KEY2=mode switch")
+        running = True
+        while running:
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-        sm.update(gray, det, keys)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            det = detect_target(gray, cfg)
+            keys.update()
 
-        render_hud(frame, sm.state, det, sm.info, cfg)
-        cv2.imshow(cfg.WINDOW_NAME, frame)
+            sm.update(gray, det, keys)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            running = False
-        elif key == ord(" "):
-            sm.handle_space()
+            render_hud(frame, sm.state, det, sm.info, cfg)
+            cv2.imshow(cfg.WINDOW_NAME, frame)
 
-    # 清理
-    motor.stop_all()
-    laser.off()
-    cap.release()
-    cv2.destroyAllWindows()
-    if GPIO_AVAILABLE:
-        GPIO.cleanup()
-    print("[EXIT] Done")
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                running = False
+            elif key == ord(" "):
+                sm.handle_space()
+    finally:
+        if motor is not None:
+            motor.stop_all()
+        if laser is not None:
+            laser.off()
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+        if GPIO_AVAILABLE:
+            GPIO.cleanup()
+        print("[EXIT] Done")
 
 
 if __name__ == "__main__":

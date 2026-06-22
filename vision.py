@@ -11,6 +11,17 @@ DetResult = namedtuple("DetResult", ["cx", "cy", "area", "approx", "distance_mm"
 _last_area = [0]
 
 
+def reset_area_history():
+    """重置帧间面积过滤历史，避免状态切换后沿用旧目标面积。"""
+    _last_area[0] = 0
+
+
+def _find_contours(binary, mode, method):
+    """兼容 OpenCV 3 和 OpenCV 4 的 findContours 返回值差异。"""
+    result = cv2.findContours(binary, mode, method)
+    return result[1] if len(result) == 3 else result[0]
+
+
 def detect_target(gray, cfg):
     """主检测流程: 高斯模糊 + 反向二值化 + 闭运算 + RETR_EXTERNAL + 矩形验证"""
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -22,8 +33,7 @@ def detect_target(gray, cfg):
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
     # RETR_EXTERNAL: 只取最外层轮廓，忽略内部红色圆环
-    _, contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
-                                      cv2.CHAIN_APPROX_SIMPLE)
+    contours = _find_contours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
@@ -131,8 +141,7 @@ def perspective_center(gray, approx):
     warped = cv2.warpPerspective(gray, M_persp, (tw, th))
 
     _, wb = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    _, w_contours, _ = cv2.findContours(wb, cv2.RETR_EXTERNAL,
-                                         cv2.CHAIN_APPROX_SIMPLE)
+    w_contours = _find_contours(wb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     best_m = None
     best_a = 0
     for c in w_contours:

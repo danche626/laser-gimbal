@@ -7,7 +7,12 @@ import math
 import numpy as np
 from enum import IntEnum
 
-from vision import detect_target, perspective_center, dynamic_laser_offset
+from vision import (
+    detect_target,
+    perspective_center,
+    dynamic_laser_offset,
+    reset_area_history,
+)
 
 
 class State(IntEnum):
@@ -47,6 +52,7 @@ class GimbalStateMachine:
         # Y轴限位
         self.pos_y_deg = 0.0
         self._prev_loop_t = time.time()
+        self._loop_dt = 1.0 / cfg.CAM_FPS if cfg.CAM_FPS > 0 else 0.033
 
         # 搜索模式
         self._search_dir = 0  # 0=负方向, 1=正方向
@@ -67,6 +73,10 @@ class GimbalStateMachine:
         det_raw: detect_target()结果或None
         keys: GPIOInput实例(已调用update)
         """
+        now = time.time()
+        self._loop_dt = min(max(now - self._prev_loop_t, 0.001), 0.2)
+        self._prev_loop_t = now
+
         # ---- 按键处理 ----
         if keys.key1_pressed:
             if self.state == State.IDLE:
@@ -131,6 +141,7 @@ class GimbalStateMachine:
         self.aligned_frames = 0
         self.fx = self.fy = None
         self.prev_area = None
+        reset_area_history()
         self.lost_count = 0
         self._circle_started = False
         print(f"[STATE] → IDLE")
@@ -139,6 +150,9 @@ class GimbalStateMachine:
         self.state = mode
         self.lost_count = 0
         self.aligned_frames = 0
+        self.fx = self.fy = None
+        self.prev_area = None
+        reset_area_history()
         self._search_angle = 0.0
         self._search_dir = 0
         self._search_found_count = 0
@@ -261,10 +275,10 @@ class GimbalStateMachine:
         # 左右扫描
         if self._search_dir == 0:
             self.motor.set_velocity(cfg.MOTOR_ADDR_X, -cfg.SEARCH_STEP_SPEED)
-            self._search_angle -= cfg.SEARCH_STEP_SPEED * 0.12 * 0.015
+            self._search_angle -= cfg.SEARCH_STEP_SPEED * cfg.Y_DEG_PER_SPEED_SEC * self._loop_dt
         else:
             self.motor.set_velocity(cfg.MOTOR_ADDR_X, cfg.SEARCH_STEP_SPEED)
-            self._search_angle += cfg.SEARCH_STEP_SPEED * 0.12 * 0.015
+            self._search_angle += cfg.SEARCH_STEP_SPEED * cfg.Y_DEG_PER_SPEED_SEC * self._loop_dt
 
         # 到边界反向
         if self._search_angle > cfg.SEARCH_RANGE_DEG:
@@ -323,8 +337,7 @@ class GimbalStateMachine:
             target_x = r * math.cos(self._circle_angle)
             target_y = r * math.sin(self._circle_angle)
             # 角度递增
-            dt = 0.015  # 约67fps
-            self._circle_angle += (2 * math.pi / cfg.CIRCLE_PERIOD_S) * dt
+            self._circle_angle += (2 * math.pi / cfg.CIRCLE_PERIOD_S) * self._loop_dt
             self.laser.fire()
 
         # PID: err = (目标位置 - 画面中心) - 圆周偏移
@@ -347,12 +360,9 @@ class GimbalStateMachine:
     # =============== 工具方法 ===============
 
     def _update_y_limit(self):
-        now = time.time()
-        dt = now - self._prev_loop_t
-        self._prev_loop_t = now
         spd_y = self.motor.get_last_speed(self.cfg.MOTOR_ADDR_Y)
         if spd_y != 0:
-            self.pos_y_deg += spd_y * self.cfg.Y_DEG_PER_SPEED_SEC * dt
+            self.pos_y_deg += spd_y * self.cfg.Y_DEG_PER_SPEED_SEC * self._loop_dt
 
     def _apply_y_limit(self, cmd_y):
         """Y轴软限位: 接近边界减速，到达边界停止"""
